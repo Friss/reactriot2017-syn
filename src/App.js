@@ -1,19 +1,14 @@
 import React, { Component } from 'react';
 import './App.css';
-import moment from 'moment';
-import logo from "./logo.svg";
+import EmailApp from './EmailApp';
+import Login from './Login';
+import debounce from 'lodash/debounce';
 
-// Client ID and API key from the Developer Console
 var CLIENT_ID = '126491382444-n5o52948rnv5js3sadpkgtc1ivq7hcvv.apps.googleusercontent.com';
-
-// Array of API discovery doc URLs for APIs used by the quickstart
 var DISCOVERY_DOCS = ["https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest"];
-
-// Authorization scopes required by the API; multiple scopes can be
-// included, separated by spaces.
 var SCOPES = 'https://www.googleapis.com/auth/gmail.readonly';
 
-function getMessage(messageId) {
+function getEmail(messageId) {
   return window.gapi.client.gmail.users.messages.get({
     'userId': 'me',
     'id': messageId,
@@ -21,7 +16,7 @@ function getMessage(messageId) {
   });
 }
 
-function parseMessage({id, result}) {
+function parseEmail({id, result}) {
   var message = {
     id,
     labels: result.labelIds,
@@ -61,9 +56,41 @@ function parseMessage({id, result}) {
 function parseMessages(messagesMap) {
   var messages = [];
   for (var id in messagesMap) {
-    messages.push(parseMessage(messagesMap[id]))
+    messages.push(parseEmail(messagesMap[id]))
   }
   return messages
+}
+
+function getBody(message) {
+  var encodedBody = '';
+  if(typeof message.parts === 'undefined')
+  {
+    encodedBody = message.body.data;
+  }
+  else
+  {
+    encodedBody = getHTMLPart(message.parts);
+  }
+  encodedBody = encodedBody.replace(/-/g, '+').replace(/_/g, '/').replace(/\s/g, '');
+  return decodeURIComponent(escape(window.atob(encodedBody)));
+}
+
+function getHTMLPart(arr) {
+  for(var x = 0; x <= arr.length; x++)
+  {
+    if(typeof arr[x].parts === 'undefined')
+    {
+      if(arr[x].mimeType === 'text/html')
+      {
+        return arr[x].body.data;
+      }
+    }
+    else
+    {
+      return getHTMLPart(arr[x].parts);
+    }
+  }
+  return '';
 }
 
 class App extends Component {
@@ -71,11 +98,13 @@ class App extends Component {
     super();
 
     this.state = {
+      checkedSignIn: false,
       isSignedIn: false,
       labels: [],
-      messages: [],
-      selectedId: null,
-      selectedMessage: null,
+      emails: [],
+      selectedLabel: 'INBOX',
+      selectedEmail: null,
+      hasFetched: false,
       profile: {
         name: '',
         email: '',
@@ -87,6 +116,11 @@ class App extends Component {
     this.updateSigninStatus = this.updateSigninStatus.bind(this);
     this.handleAuthClick = this.handleAuthClick.bind(this);
     this.handleSignoutClick = this.handleSignoutClick.bind(this);
+    this.handleEmailSelect = this.handleEmailSelect.bind(this);
+    this.handleSearch = this.handleSearch.bind(this);
+    this.handleLabelSelect = this.handleLabelSelect.bind(this);
+    this.getEmailMetaData = this.getEmailMetaData.bind(this);
+    this.deboucedGetEmails = debounce(this.getEmails, 250);
   }
 
   componentDidMount() {
@@ -99,10 +133,7 @@ class App extends Component {
       clientId: CLIENT_ID,
       scope: SCOPES
     }).then(() => {
-      // Listen for sign-in state changes.
       window.gapi.auth2.getAuthInstance().isSignedIn.listen(this.updateSigninStatus);
-
-      // Handle the initial sign-in state.
       this.updateSigninStatus(window.gapi.auth2.getAuthInstance().isSignedIn.get());
     });
   }
@@ -112,7 +143,7 @@ class App extends Component {
    *  appropriately. After a sign-in, the API is called.
    */
   updateSigninStatus(isSignedIn) {
-    this.setState({isSignedIn})
+    this.setState({isSignedIn, checkedSignIn: true})
     if (isSignedIn) {
       const googleUser = window.gapi.auth2.getAuthInstance().currentUser.get().getBasicProfile();
 
@@ -124,22 +155,30 @@ class App extends Component {
 
       this.setState({profile})
 
-      this.listLabels();
-      this.listMessages('me', '', (results) => {
-        var batch = window.gapi.client.newBatch();
-        results.forEach((message) => {
-          batch.add(getMessage(message.id), {'id': message.id});
-        })
-
-        batch.execute((responseMap, rawBatchResponse) => {
-          console.log("responseMap", responseMap)
-          this.setState({messages: parseMessages(responseMap)})
-        })
-      })
+      this.getLabels();
+      this.getEmails('me', '', this.state.selectedLabel, this.getEmailMetaData)
     }
   }
 
-  listLabels() {
+  getEmailMetaData(results) {
+    if (results.length === 1 && results[0] === undefined) {
+      this.setState({emails: [], hasFetched: true})
+    }
+
+    var batch = window.gapi.client.newBatch();
+    results.forEach((email) => {
+      if (!email) {
+        return;
+      }
+      batch.add(getEmail(email.id), {'id': email.id});
+    });
+
+    batch.execute((responseMap, rawBatchResponse) => {
+      this.setState({emails: parseMessages(responseMap), hasFetched: true})
+    })
+  }
+
+  getLabels() {
     window.gapi.client.gmail.users.labels.list({
       'userId': 'me'
     }).then((response) => {
@@ -148,8 +187,8 @@ class App extends Component {
     });
   }
 
-  listMessages(userId, query, callback) {
-    var getPageOfMessages = (request, result) => {
+  getEmails(userId, query, label, callback) {
+    var getPageOfEmails = (request, result) => {
       request.execute(function(resp) {
         result = result.concat(resp.messages);
         var nextPageToken = resp.nextPageToken;
@@ -157,10 +196,11 @@ class App extends Component {
           request = window.gapi.client.gmail.users.messages.list({
             'userId': userId,
             'pageToken': nextPageToken,
-            'q': query
+            'q': query,
+            labelIds: label
           });
           callback(result)
-          // getPageOfMessages(request, result);
+          // getPageOfEmails(request, result);
         } else {
           callback(result);
         }
@@ -168,19 +208,43 @@ class App extends Component {
     };
     var initialRequest = window.gapi.client.gmail.users.messages.list({
       'userId': userId,
-      'q': query
+      'q': query,
+      labelIds: label,
+      maxResults: 50
     });
-    getPageOfMessages(initialRequest, []);
+    getPageOfEmails(initialRequest, []);
   }
 
-  handleMessageClick(selectedId) {
-    this.setState({selectedId});
+  handleLabelSelect(selectedLabel) {
+    this.setState({selectedLabel});
+    this.getEmails('me', '', selectedLabel, this.getEmailMetaData);
+  }
+
+  handleEmailSelect(selectedId) {
+    var request = window.gapi.client.gmail.users.messages.get({
+      'userId': 'me',
+      'id': selectedId
+    });
+    request.execute((email) => {
+      this.setState({ selectedEmail: {
+        body: getBody(email.payload),
+        details: parseEmail(email)
+        }
+      });
+    });
+  }
+
+  handleSearch(evt) {
+    const searchQuery = evt.target.value;
+    this.setState({searchQuery});
+    this.deboucedGetEmails('me', searchQuery, '', this.getEmailMetaData);
   }
 
   /**
    *  Sign in the user upon button click.
    */
   handleAuthClick(event) {
+    event.preventDefault();
     window.gapi.auth2.getAuthInstance().signIn();
   }
 
@@ -189,69 +253,59 @@ class App extends Component {
    */
   handleSignoutClick(event) {
     window.gapi.auth2.getAuthInstance().signOut();
+    this.setState({
+      isSignedIn: false,
+      labels: [],
+      emails: [],
+      selectedEmail: null,
+      profile: {
+        name: '',
+        email: '',
+        imageUrl: '',
+      }
+    });
+  }
+
+  renderLogin() {
+    const {isSignedIn, checkedSignIn} = this.state;
+
+    if (isSignedIn) {
+      return null;
+    }
+
+    return (
+      <Login handleAuth={this.handleAuthClick} checkedSignIn={checkedSignIn} />
+    );
+  }
+
+  renderEmailApp() {
+    const {emails, labels, profile, isSignedIn, selectedEmail, selectedLabel, hasFetched} = this.state;
+
+    if (!isSignedIn) {
+      return null;
+    }
+
+    return (
+      <EmailApp
+        profile={profile}
+        emails={emails}
+        labels={labels}
+        selectedEmail={selectedEmail}
+        selectedLabel={selectedLabel}
+        handleLabelSelect={this.handleLabelSelect}
+        handleEmailSelect={this.handleEmailSelect}
+        handleSignoutClick={this.handleSignoutClick}
+        handleSearch={this.handleSearch}
+        hasFetched={hasFetched}
+      />
+    );
   }
 
   render() {
     return (
       <div className="App">
-        <div className="row main-grid">
-          <div className="col-md-2">
-            <div className="d-flex flex-column column-section">
-              <div className="column-header">
-                <button className="btn btn-info btn-lg rounded-0 w-100">Compose</button>
-              </div>
-              <div className="column-content">
-                <ul className="list-group">
-                  {this.state.labels.map((label) => {
-                    return (
-                      <li className="list-group-item" key={label.id}>
-                        {label.name}
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-              <div className="column-footer border border-left-0 border-bottom-0 pt-2 pb-2 pl-2 pr-2">
-                <div className="media">
-                  <img className="d-flex mr-2 rounded-circle box-shadow" width="64" src={this.state.profile.imageUrl} alt="Generic placeholder image" />
-                  <div className="media-body">
-                    <p className="mb-0">{this.state.profile.name}</p>
-                    <p>{this.state.profile.email}</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div className="col-md-4">
-            <div className="d-flex flex-column column-section">
-              <div className="column-header">
-                <div className="input-group form-group-with-border mb-0 pb-2 pt-2 pl-2 pr-2" data-background-color="orange">
-                  <input type="text" className="form-control" placeholder="Search" />
-                  <span className="input-group-addon">
-                    <i className="now-ui-icons ui-1_zoom-bold" />
-                  </span>
-                </div>
-              </div>
-              <div className="column-content">
-                {this.state.messages.map((message) => {
-                  return (
-                    <div key={message.id} className="email-entry" onClick={this.handleMessageClick.bind(this, message.id)}>
-                      <p className="mb-0"><small>{message.from}</small></p>
-                      <div className="mb-2 d-flex justify-content-between">
-                        <span>{message.subject}</span>
-                        <span>{moment(message.date).calendar()}</span>
-                      </div>
-                      <p className="mb-0">{message.snippet}</p>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          </div>
-          <div className="col-md-6">
-            {this.state.selectedId}
-          </div>
-        </div>
+        {this.renderLogin()}
+        {this.renderEmailApp()}
       </div>
     );
   }
