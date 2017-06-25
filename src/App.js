@@ -237,7 +237,7 @@ class App extends Component {
   handleSearch(evt) {
     const searchQuery = evt.target.value;
     this.setState({searchQuery});
-    this.deboucedGetEmails('me', searchQuery, '', this.getEmailMetaData);
+    this.deboucedGetEmails('me', searchQuery, this.state.selectedLabel, this.getEmailMetaData);
   }
 
   /**
